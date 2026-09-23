@@ -2,11 +2,12 @@ import pandas as pd
 import folium
 from folium.plugins import TimestampedGeoJson
 import json
+import math
 
 def load_data():
-    data = pd.read_csv("puffin_data.csv")
+    data = pd.read_csv("puffin_dataset.csv")
 
-    data["timestamp"] = pd.to_datetime(data["timestamp"])
+    data["timestamp"] = pd.to_datetime(data["timestamp"], format="%d/%m/%Y %H:%M:%S")
 
     data = data.sort_values(["tag-local-identifier", "timestamp"])
 
@@ -36,7 +37,7 @@ def assign_colours(data):
     return puffin_colours
 
 def create_map(data):
-    centre_lat = data["location-lat"].mean()
+    centre_lat = data["bas:compensated-latitute"].mean()
     centre_long = data["location-long"].mean()
 
     map = folium.Map(
@@ -57,18 +58,26 @@ def create_timeline(data, map, puffin_colours):
         for _, row in group.iterrows():
             colour = puffin_colours[puffin_id]
 
+            popup_text = (
+                f"<b>Puffin:</b> {puffin_id}<br>"
+                f"<b>Latitude:</b> {row["bas:compensated-latitute"]:.4f}<br>"
+                f"<b>Longitude:</b> {row["location-long"]:.4f}<br>"
+                f"<b>Date:</b> {row["timestamp"].strftime('%Y-%m-%d')}<br>"
+                f"<b>Time:</b> {row["timestamp"].strftime('%H:%M:%S')}"
+            )
+
             feature = {
                 "type": "Feature",
 
                 "geometry": {
                     "type": "Point",
-                    "coordinates": [row["location-long"], row["location-lat"]]
+                    "coordinates": [row["location-long"], row["bas:compensated-latitute"]]
                 },
 
                 "properties": {
                     "time": row["timestamp"].isoformat(),
                     "puffin_id": str(puffin_id),
-                    "popup": str(puffin_id),
+                    "popup": popup_text,
                     "icon": "circle",
 
                     "iconstyle": {
@@ -203,12 +212,110 @@ def checkbox(puffin_colours, map):
 
     map.get_root().html.add_child(folium.Element(checkbox_html))
 
+
+def distance_puffin(data):
+    puffin_distance = {}
+    R = 6_371
+
+    for puffin, group in data.groupby("tag-local-identifier"):
+        distance = 0
+
+        for i in range(1, len(group)):
+            point1 = group.iloc[i-1]
+            point2 = group.iloc[i]
+
+            lat1 = point1["bas:compensated-latitute"]
+            long1 = point1["location-long"]
+
+            lat2 = point2["bas:compensated-latitute"]
+            long2 = point2["location-long"]
+
+            phi1 = math.radians(lat1)
+            phi2 = math.radians(lat2)
+            d_phi = math.radians(lat2 - lat1)
+            d_lambda = math.radians(long2 - long1)
+
+            a = (math.sin(d_phi / 2) ** 2 +
+                math.cos(phi1) * math.cos(phi2) *
+                math.sin(d_lambda / 2) ** 2)
+
+            c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+
+            d = c * R
+
+            distance = distance + d
+
+        puffin_distance[puffin] = distance
+
+    return puffin_distance
+
+def calculate_statistic(data, puffin_distance):
+    birds_tracked = data["tag-local-identifier"].nunique()
+    tracking_points = len(data)
+    earliest_date = data["timestamp"].min()
+    latest_date = data["timestamp"].max()
+    total_distance = sum(puffin_distance.values())
+
+    return {"birds_tracked": birds_tracked, "tracking_points": tracking_points, "total_distance": total_distance,
+             "earliest_date": earliest_date, "latest_date": latest_date}
+
+
+def add_statistic_box(map, overall):
+    earliest = overall["earliest_date"].strftime('%Y-%m-%d')
+    latest = overall["latest_date"].strftime('%Y-%m-%d')
+
+    statistic_html = f"""
+    <div style = "
+        position: fixed;
+        top: 100px;
+        left: 20px;
+        width: 180px;
+        background-color: white;
+        border: 2px solid grey;
+        border-radius: 5px;
+        z-index: 9999;
+        font-size: 12px;
+        padding: 10px;
+        opacity: 0.85;">
+
+        <b>Overall Migration Statistics:</b>
+        <hr>
+
+        <b>Birds Tracked: </b> 
+        {overall["birds_tracked"]}
+        <br><br>
+
+        <b>Total tracking points: </b> 
+        {overall["tracking_points"]}
+        <br><br>
+
+        <b>Total distance(km): </b> 
+        {overall["total_distance"]}
+        <br><br>
+
+        <b>Earliest date: </b> 
+        {earliest}
+        <br><br>
+
+        <b>Latest date: </b> 
+        {latest}
+        <br><br>
+    </div>
+    """
+    map.get_root().html.add_child(folium.Element(statistic_html))
+
+
 def main():
     data = load_data()
     puffin_colours = assign_colours(data)
     map = create_map(data)
     timeline = create_timeline(data, map, puffin_colours)
     checkbox(puffin_colours, map)
+
+    puffin_distance = distance_puffin(data)
+    overall = calculate_statistic(data, puffin_distance) 
+    add_statistic_box(map, overall)
+
     map.save("puffin_map.html")
 
 main()
